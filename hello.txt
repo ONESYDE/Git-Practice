@@ -1,2 +1,2 @@
-Hello
-Git!
+Hello, Git!
+This is my second change.
