@@ -1,20 +1,13 @@
 """
 converter.py
 
-Convert videos into broadly compatible MP4 files.
-
-Primary encoder:
-    Intel Quick Sync H.264 (h264_qsv)
-
-Automatic fallback:
-    CPU H.264 (libx264)
-
-Final format:
-    H.264/AVC video
-    AAC-LC audio
-    MP4 container
-    4:2:0 pixel format
-    Fast-start metadata
+Convert downloaded or local videos into a broadly compatible MP4:
+- H.264/AVC video
+- AAC-LC audio
+- 30 FPS maximum
+- Fast-start metadata
+- Intel Quick Sync hardware encoding with automatic libx264 fallback
+- Full-file validation before publishing the final MP4
 """
 
 from __future__ import annotations
@@ -34,32 +27,33 @@ class ConversionError(RuntimeError):
 
 
 def _resolve_ffmpeg(ffmpeg_path: str | None) -> str:
-    """Return a validated FFmpeg path or the ffmpeg command from PATH."""
+    """Return a validated FFmpeg executable path or use FFmpeg from PATH."""
     if ffmpeg_path:
         resolved = Path(
             os.path.abspath(
                 os.path.expandvars(ffmpeg_path)
             )
-        )
+        ).expanduser()
 
         if not resolved.is_file():
             raise FileNotFoundError(
                 "ffmpeg.exe was not found:\n"
-                f"{resolved}"
+                f"{resolved}\n\n"
+                "Put ffmpeg.exe beside the application or add FFmpeg to PATH."
             )
 
-        return str(resolved)
+        return str(resolved.resolve())
 
     return "ffmpeg"
 
 
-def _run(
-    command: list[str],
-) -> subprocess.CompletedProcess[str]:
+def _run(command: list[str]) -> subprocess.CompletedProcess[str]:
     """
     Run FFmpeg safely without shell=True.
 
-    Every FFmpeg argument must be a string.
+    Every FFmpeg argument must be a string. This validation produces a useful
+    error if a tuple, Path, integer, or other object accidentally enters the
+    command list.
     """
     for index, argument in enumerate(command):
         if not isinstance(argument, str):
@@ -93,11 +87,8 @@ def _run(
     )
 
 
-def _unique_output_path(
-    folder: Path,
-    stem: str,
-) -> Path:
-    """Return an unused MP4 path for a local-file conversion."""
+def _unique_output_path(folder: Path, stem: str) -> Path:
+    """Return an unused MP4 path for a local conversion."""
     candidate = folder / f"{stem}.mp4"
 
     if not candidate.exists():
@@ -114,20 +105,13 @@ def _unique_output_path(
         number += 1
 
 
-def _temporary_path(
-    final_path: Path,
-) -> Path:
-    """Return a unique temporary MP4 path beside the final file."""
+def _temporary_path(final_path: Path) -> Path:
+    """Return a unique temporary MP4 path beside the final output."""
     token = uuid.uuid4().hex[:12]
-
-    return final_path.parent / (
-        f".{final_path.stem}.{token}.tmp.mp4"
-    )
+    return final_path.parent / f".{final_path.stem}.{token}.tmp.mp4"
 
 
-def _remove_quietly(
-    path: Path,
-) -> None:
+def _remove_quietly(path: Path) -> None:
     """Delete a temporary file while ignoring cleanup errors."""
     try:
         if path.exists():
@@ -136,10 +120,7 @@ def _remove_quietly(
         pass
 
 
-def _inspect(
-    ffmpeg: str,
-    path: Path,
-) -> str:
+def _inspect(ffmpeg: str, path: Path) -> str:
     """Return FFmpeg stream information for a media file."""
     result = _run(
         [
@@ -153,56 +134,39 @@ def _inspect(
 
     return "\n".join(
         value
-        for value in (
-            result.stdout,
-            result.stderr,
-        )
+        for value in (result.stdout, result.stderr)
         if value
     )
 
 
-def _validate(
-    ffmpeg: str,
-    path: Path,
-) -> None:
-    """Validate codecs, pixel format, and full-file decoding."""
-    if (
-        not path.is_file()
-        or path.stat().st_size < 1_024
-    ):
+def _validate(ffmpeg: str, path: Path) -> None:
+    """Validate codecs, pixel format, file size, and complete decoding."""
+    if not path.is_file() or path.stat().st_size < 1_024:
         raise ConversionError(
             "The converted MP4 is missing or unexpectedly small."
         )
 
-    media_info = _inspect(
-        ffmpeg,
-        path,
-    ).lower()
+    media_info = _inspect(ffmpeg, path).lower()
 
     if "video: h264" not in media_info:
         raise ConversionError(
-            "The final MP4 is not H.264 video."
+            "The final MP4 does not contain H.264 video."
         )
 
-    # Intel Quick Sync may report 4:2:0 as NV12.
-    # CPU libx264 normally reports yuv420p.
-    if (
-        "yuv420p" not in media_info
-        and "nv12" not in media_info
-    ):
+    # Intel Quick Sync may report 4:2:0 video as NV12. CPU libx264 normally
+    # reports yuv420p. Both are compatible 8-bit 4:2:0 formats.
+    if "yuv420p" not in media_info and "nv12" not in media_info:
         raise ConversionError(
-            "The final MP4 does not use a compatible "
-            "4:2:0 pixel format."
+            "The final MP4 does not use a compatible 4:2:0 pixel format."
         )
 
-    if (
-        "audio:" in media_info
-        and "audio: aac" not in media_info
-    ):
+    if "audio:" in media_info and "audio: aac" not in media_info:
         raise ConversionError(
             "The final MP4 contains non-AAC audio."
         )
 
+    # Decode the entire completed file. This rejects truncated or corrupt MP4s
+    # before the file is moved into its permanent destination.
     result = _run(
         [
             ffmpeg,
@@ -237,10 +201,11 @@ def _validate(
 
 
 def _common_command_prefix(
+    *,
     ffmpeg: str,
     source: Path,
 ) -> list[str]:
-    """Return FFmpeg arguments shared by both encoders."""
+    """Return input and stream-selection arguments shared by both encoders."""
     return [
         ffmpeg,
         "-hide_banner",
@@ -264,9 +229,10 @@ def _common_command_prefix(
 
 
 def _common_command_suffix(
+    *,
     temporary: Path,
 ) -> list[str]:
-    """Return FFmpeg output arguments shared by both encoders."""
+    """Return output arguments shared by both encoders."""
     return [
         "-tag:v",
         "avc1",
@@ -293,22 +259,23 @@ def _common_command_suffix(
 
 
 def _qsv_command(
+    *,
     ffmpeg: str,
     source: Path,
     temporary: Path,
     quality: int,
 ) -> list[str]:
-    """Build an Intel Quick Sync H.264 conversion command."""
+    """Build the Intel Quick Sync H.264 conversion command."""
     return (
         _common_command_prefix(
-            ffmpeg,
-            source,
+            ffmpeg=ffmpeg,
+            source=source,
         )
         + [
             "-c:v",
             "h264_qsv",
             "-preset",
-            "faster",
+            "medium",
             "-global_quality",
             str(quality),
             "-profile:v",
@@ -323,23 +290,24 @@ def _qsv_command(
             "30",
         ]
         + _common_command_suffix(
-            temporary
+            temporary=temporary,
         )
     )
 
 
 def _cpu_command(
+    *,
     ffmpeg: str,
     source: Path,
     temporary: Path,
     preset: str,
     crf: int,
 ) -> list[str]:
-    """Build the universal CPU H.264 fallback command."""
+    """Build the universal libx264 CPU fallback command."""
     return (
         _common_command_prefix(
-            ffmpeg,
-            source,
+            ffmpeg=ffmpeg,
+            source=source,
         )
         + [
             "-c:v",
@@ -358,9 +326,30 @@ def _cpu_command(
             "30",
         ]
         + _common_command_suffix(
-            temporary
+            temporary=temporary,
         )
     )
+
+
+def _verify_command_output(
+    *,
+    encoder_name: str,
+    command: list[str],
+    temporary: Path,
+) -> None:
+    """Confirm that an FFmpeg command ends with the intended MP4 output."""
+    expected_ending = [
+        "-f",
+        "mp4",
+        str(temporary),
+    ]
+
+    if command[-3:] != expected_ending:
+        raise ConversionError(
+            f"{encoder_name} command has an invalid output section.\n\n"
+            f"Expected final arguments:\n{expected_ending!r}\n\n"
+            f"Actual final arguments:\n{command[-3:]!r}"
+        )
 
 
 def make_itunes_mp4(
@@ -369,30 +358,26 @@ def make_itunes_mp4(
     ffmpeg_path: str | None = None,
     output_dir: str | Path | None = None,
     replace_source: bool = False,
-    preset: str = "fast",
-    crf: int = 23,
-    qsv_quality: int = 25,
+    preset: str = "medium",
+    crf: int = 19,
+    qsv_quality: int = 19,
     on_status: StatusCallback | None = None,
     on_progress: ProgressCallback | None = None,
 ) -> str:
     """
     Convert one video into a validated H.264/AAC MP4.
 
-    Intel Quick Sync is tried first. If it cannot encode a particular
-    source, the function retries automatically with CPU libx264.
-
-    Automatic downloads:
+    Automatic-download mode:
         output_dir=<Course/Week folder>
         replace_source=True
 
-    Local conversions:
+    Local-conversion mode:
         replace_source=False
+
+    Intel Quick Sync is attempted first. When Quick Sync fails for a specific
+    video or device state, conversion automatically retries with libx264.
     """
-    source = (
-        Path(input_path)
-        .expanduser()
-        .resolve()
-    )
+    source = Path(input_path).expanduser().resolve()
 
     if not source.is_file():
         raise FileNotFoundError(
@@ -401,9 +386,7 @@ def make_itunes_mp4(
         )
 
     destination = (
-        Path(output_dir)
-        .expanduser()
-        .resolve()
+        Path(output_dir).expanduser().resolve()
         if output_dir is not None
         else source.parent
     )
@@ -414,7 +397,8 @@ def make_itunes_mp4(
     )
 
     if replace_source:
-        # Automatic downloads keep one exact permanent MP4 filename.
+        # Automatic downloads keep one exact permanent filename. The existing
+        # destination is replaced only after the new MP4 passes validation.
         final_path = destination / f"{source.stem}.mp4"
     else:
         # Local conversions preserve the original file.
@@ -423,27 +407,34 @@ def make_itunes_mp4(
             f"{source.stem} [Compatible]",
         )
 
-    temporary = _temporary_path(
-        final_path
-    )
-
-    ffmpeg = _resolve_ffmpeg(
-        ffmpeg_path
-    )
+    temporary = _temporary_path(final_path)
+    ffmpeg = _resolve_ffmpeg(ffmpeg_path)
 
     qsv_command = _qsv_command(
-        ffmpeg,
-        source,
-        temporary,
-        qsv_quality,
+        ffmpeg=ffmpeg,
+        source=source,
+        temporary=temporary,
+        quality=qsv_quality,
     )
 
     cpu_command = _cpu_command(
-        ffmpeg,
-        source,
-        temporary,
-        preset,
-        crf,
+        ffmpeg=ffmpeg,
+        source=source,
+        temporary=temporary,
+        preset=preset,
+        crf=crf,
+    )
+
+    _verify_command_output(
+        encoder_name="Intel Quick Sync",
+        command=qsv_command,
+        temporary=temporary,
+    )
+
+    _verify_command_output(
+        encoder_name="CPU libx264",
+        command=cpu_command,
+        temporary=temporary,
     )
 
     encoder_used = "Intel Quick Sync"
@@ -454,12 +445,10 @@ def make_itunes_mp4(
 
         if on_status:
             on_status(
-                "Converting with Intel Quick Sync..."
+                "Converting with Intel Quick Sync at high text clarity..."
             )
 
-        result = _run(
-            qsv_command
-        )
+        result = _run(qsv_command)
 
         if result.returncode != 0:
             qsv_details = (
@@ -468,9 +457,7 @@ def make_itunes_mp4(
                 or "No Quick Sync details were returned."
             )
 
-            _remove_quietly(
-                temporary
-            )
+            _remove_quietly(temporary)
 
             if on_status:
                 on_status(
@@ -478,10 +465,7 @@ def make_itunes_mp4(
                     "Retrying with the CPU encoder..."
                 )
 
-            result = _run(
-                cpu_command
-            )
-
+            result = _run(cpu_command)
             encoder_used = "CPU libx264"
 
             if result.returncode != 0:
@@ -503,34 +487,23 @@ def make_itunes_mp4(
             on_progress(92.0)
 
         if on_status:
-            on_status(
-                "Validating the completed MP4..."
-            )
+            on_status("Validating the completed MP4...")
 
-        _validate(
-            ffmpeg,
-            temporary,
-        )
+        _validate(ffmpeg, temporary)
 
         if on_progress:
             on_progress(98.0)
 
         # Publish only after conversion and validation both succeed.
-        os.replace(
-            temporary,
-            final_path,
-        )
+        os.replace(temporary, final_path)
 
-        if (
-            replace_source
-            and source != final_path
-        ):
+        if replace_source and source != final_path:
             try:
                 source.unlink()
             except OSError as exc:
                 raise ConversionError(
-                    "The final MP4 was created, but the temporary "
-                    "source could not be removed:\n"
+                    "The final MP4 was created, but the temporary source "
+                    "could not be removed:\n"
                     f"{source}\n\n"
                     f"{exc}"
                 ) from exc
@@ -547,6 +520,4 @@ def make_itunes_mp4(
         return str(final_path)
 
     finally:
-        _remove_quietly(
-            temporary
-        )
+        _remove_quietly(temporary)
