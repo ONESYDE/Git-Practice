@@ -1,0 +1,54 @@
+# Python virtual environments
+.venv/
+venv/
+env/
+
+# Python cache files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Private authentication files
+cookies.txt
+cookies*.txt
+
+# FFmpeg binaries
+ffmpeg.exe
+ffprobe.exe
+
+# Downloaded video and media files
+*.mp4
+*.mkv
+*.webm
+*.mov
+*.avi
+*.m4v
+*.flv
+*.ts
+*.3gp
+*.mpeg
+*.mpg
+
+# Temporary downloader files
+.onesyde-working/
+*.part
+*.ytdl
+*.tmp
+*.temp
+
+# PyInstaller output
+build/
+dist/
+
+# Development and testing caches
+.ruff_cache/
+.pytest_cache/
+.mypy_cache/
+
+# Editor settings
+.vscode/
+
+# Windows and macOS system files
+Thumbs.db
+Desktop.ini
+.DS_Store
